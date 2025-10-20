@@ -7,6 +7,7 @@ generate_feedback.py
 - Uses GPT to produce process-oriented meta-feedback
 - Supports both Code (algorithm.py) and Pseudocode (PSEUDOCODE.md)
 - No preset/default hints; ALL guidance comes from the model
+- Added "Change summary" (commits/files/added/removed/top files)
 """
 
 import os
@@ -84,9 +85,80 @@ def now_stamp() -> str:
 
 
 def write_feedback(md: str) -> str:
-    out = f"Meta-Feedback_{now_stamp()}.md"
+    out = f"Meta-Feedback_{now_stamp()}.md"  # 保持时间戳命名
     pathlib.Path(out).write_text(md, encoding="utf-8")
     return out
+
+
+# ---------------- change summary (new) ----------------
+def count_commits_between(base: str, head: str) -> int:
+    """Count commits from base(exclusive) to head(inclusive)."""
+    if base == head:
+        return 0
+    try:
+        return int(sh(f"git rev-list --count {base}..{head}"))
+    except Exception:
+        return 0
+
+
+def build_change_summary(base: str, head: str) -> str:
+    """
+    Summarize change size between two SHAs using numstat (robust across locales).
+    Returns a short multiline string for the prompt.
+    """
+    if base == head:
+        return "No new changes."
+
+    # Sum added/removed by file
+    added_total = 0
+    deleted_total = 0
+    file_changes = []  # [(adds, dels, path), ...]
+
+    try:
+        numstat = sh(f"git diff --numstat {base} {head}")
+        for line in numstat.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 3:
+                continue
+            a, d, path = parts[0], parts[1], parts[2]
+            # binary changes show as '-' — skip counting lines in that case
+            ia = int(a) if a.isdigit() else 0
+            idel = int(d) if d.isdigit() else 0
+            added_total += ia
+            deleted_total += idel
+            file_changes.append((ia, idel, path))
+    except Exception:
+        # Fallback to shortstat if numstat fails
+        try:
+            short = sh(f"git diff --shortstat {base} {head}")
+        except Exception:
+            short = ""
+        # Parse e.g. "3 files changed, 42 insertions(+), 7 deletions(-)"
+        import re as _re
+        files_changed = int(_re.search(r"(\d+) files? changed", short).group(1)) if "changed" in short else 0
+        ins = int(_re.search(r"(\d+) insertions?\(\+\)", short).group(1)) if "insertions" in short else 0
+        dels = int(_re.search(r"(\d+) deletions?\(-\)", short).group(1)) if "deletions" in short else 0
+        added_total, deleted_total = ins, dels
+        return "\n".join([
+            f"- Commits since last feedback: {count_commits_between(base, head)}",
+            f"- Files changed: {files_changed}",
+            f"- Lines added: {added_total}, removed: {deleted_total}",
+        ])
+
+    files_changed = len(file_changes)
+    commits = count_commits_between(base, head)
+
+    # Top-N files by churn (adds + dels), max 5
+    file_changes.sort(key=lambda t: (t[0] + t[1]), reverse=True)
+    top = file_changes[:5]
+    top_str = ", ".join([f"{p} (+{a}/-{d})" for a, d, p in top]) if top else "(none)"
+
+    return "\n".join([
+        f"- Commits since last feedback: {commits}",
+        f"- Files changed: {files_changed}",
+        f"- Lines added: {added_total}, removed: {deleted_total}",
+        f"- Top changed files: {top_str}",
+    ])
 
 
 # ---------------- minimal content heuristics (no preset hints) ----------------
@@ -180,15 +252,25 @@ def call_gpt(system_prompt: str, user_prompt: str) -> str:
 
 
 # ---------------- prompts ----------------
-SYSTEM_PROMPT = """You are a teaching assistant generating process-oriented meta-feedback for a university algorithms assignment.
-Students may submit code (algorithm.py) OR pseudocode (PSEUDOCODE.md). English only.
-Focus on actionable guidance about planning, implementation/pseudocode quality, validation (tests or worked examples), and reflection (complexity, invariants/exchange-argument, counterexamples).
-If the repository is minimal or empty, you should still provide constructive, step-by-step guidance tailored to the detected state—do not assume a specific algorithm family (e.g., not necessarily greedy).
-Be concise and structured; use Markdown with short bullets where helpful. Do NOT include boilerplate or generic platitudes.
+SYSTEM_PROMPT = """You are a teaching assistant providing **process-oriented meta-feedback** for a university algorithms assignment.
+
+Students may submit either **code (algorithm.py)** or **pseudocode (PSEUDOCODE.md)** — feedback must be **in English** and **easy to understand**.
+
+Focus on **how they plan, implement, test, and reflect**, not just correctness.  
+Always give **specific and actionable** suggestions.
+
+If the repository is empty or mostly blank, provide **constructive step-by-step guidance** to help the student start:
+- suggest what to write first (e.g., function outline or pseudocode skeleton),
+- mention 1–2 simple example inputs to test,
+- remind them to explain their algorithm idea clearly.
+
+Keep feedback **concise, structured, and encouraging**.  
+Use **Markdown** formatting with short bullet points.  
+Do **not** include generic praise or unrelated filler.
 """
 
 USER_PROMPT_TEMPLATE = """\
-Generate process-focused meta-feedback for the latest change ({base}..{head}).
+Generate clear, process-focused meta-feedback for the latest change ({base}..{head}).
 
 [Recent commits]
 {logs}
@@ -198,6 +280,9 @@ Generate process-focused meta-feedback for the latest change ({base}..{head}).
 
 [Changed files (name-status)]
 {name_status}
+
+[Change summary]
+{change_summary}
 
 [Diff (unified; may be truncated)]
 ```diff
@@ -212,31 +297,31 @@ Use this structure:
 Meta-Feedback (Process-Oriented)
 Signals Observed
 
-(What changed? Small-step commits? Clear messages?)
+(What changed? Are commits small and clear?)
 
 (Any structure/API changes? Added/removed helpers?)
 
 Actionable Suggestions
 
 Planning:
+(Did the student describe the problem and plan the approach clearly? What to improve?)
 
 Implementation / Pseudocode quality:
+(Clarity, correctness, readability, logic flow)
 
 Validation:
+(Tests, examples, or missing edge cases)
 
 Reflection:
+(Complexity, correctness reasoning, alternative approaches)
 
-Technique-Specific Considerations (only if applicable)
+If the submission is empty or minimal
 
-Clearly state the chosen approach/criterion and why it fits the problem.
+Give simple step-by-step hints for starting a solution.
 
-Mark an invariant OR outline an exchange/correctness sketch appropriate for the chosen technique.
+Suggest writing a function/pseudocode outline and one or two test cases.
 
-Compare to a naive/baseline approach (correctness + complexity).
-
-Walk through 2 tiny examples end-to-end.
-
-Consider tricky or near-counterexample cases and how to detect/handle them.
+Encourage short comments explaining each step.
 """
 # ---------------- main ----------------
 def main() -> None:
@@ -254,6 +339,9 @@ def main() -> None:
     status = detect_content_status()
     content_summary = describe_content_status(status)
 
+    # Change summary
+    change_summary = build_change_summary(last, head)
+
     # Build user prompt
     user_prompt = USER_PROMPT_TEMPLATE.format(
         base=last[:7],
@@ -261,20 +349,19 @@ def main() -> None:
         logs=d["logs"] or "(none)",
         tree=d["tree"] or "(none)",
         name_status=d["name_status"] or "(none)",
+        change_summary=change_summary,
         patch=(d["patch"][:20000] if d["patch"] else "(none)"),
         content_summary=content_summary,
     )
 
-    # Call GPT (no default/fallback hints). If the API fails, provide a minimal error note only.
+    # Call GPT
     try:
         feedback_md = call_gpt(SYSTEM_PROMPT, user_prompt)
     except Exception as e:
-        feedback_md = textwrap.dedent(
-            f"""\
-            # Meta-Feedback (Process-Oriented)
-            The feedback service encountered an error: {e}
-            Please retry the instructor-triggered workflow.
-            """
+        feedback_md = (
+            "# Meta-Feedback (Process-Oriented)\n"
+            f"The feedback service encountered an error: {e}\n"
+            "Please retry the instructor-triggered workflow.\n"
         )
 
     out = write_feedback(feedback_md)
@@ -284,4 +371,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
