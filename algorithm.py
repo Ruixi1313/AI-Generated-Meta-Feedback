@@ -1,15 +1,5 @@
 
 # Assignment: Greedy Algorithm (Individual)
-# Problem: Activity Selection
+# Problem: 
 
-from typing import List, Tuple
 
-def select_activities(activities):
-    return []
-
-def main():
-    #  code here
-    pass
-
-if __name__ == "__main__":
-    main()

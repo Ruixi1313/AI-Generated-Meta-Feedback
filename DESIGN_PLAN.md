@@ -13,7 +13,7 @@ This document is the **design plan**. Complete it **before writing your code** i
 - What is your **greedy choice** at each step?  
 - Why do you believe this greedy choice works?  
 
-
+git 
 ## 3. Test Cases
 List at least **3 test cases** you will use, including edge cases.  
 - Case 1: Normal input  
