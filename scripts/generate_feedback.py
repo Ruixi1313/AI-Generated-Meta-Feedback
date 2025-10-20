@@ -85,7 +85,7 @@ def now_stamp() -> str:
 
 
 def write_feedback(md: str) -> str:
-    out = f"Meta-Feedback_{now_stamp()}.md"  # 保持时间戳命名
+    out = f"Meta-Feedback_{now_stamp()}.md"  # timestamp
     pathlib.Path(out).write_text(md, encoding="utf-8")
     return out
 
@@ -228,27 +228,44 @@ def describe_content_status(status: Dict[str, Any]) -> str:
 # ---------------- OpenAI client ----------------
 def call_gpt(system_prompt: str, user_prompt: str) -> str:
     """
-    Uses OpenAI's Python SDK (>=1.0).
-    Env:
-      - OPENAI_API_KEY (required)
-      - OPENAI_BASE_URL (optional; proxy/Azure)
-      - OPENAI_MODEL (optional; default gpt-4o-mini)
+    Robust OpenAI call (defaults + retries).
     """
+    import time
     from openai import OpenAI
+    from openai import APIConnectionError, APIError, RateLimitError, Timeout
 
-    base_url = os.environ.get("OPENAI_BASE_URL") or None
-    model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), base_url=base_url)
+    # Coalesce empty strings to sensible defaults
+    base_url_env = os.environ.get("OPENAI_BASE_URL")
+    base_url = base_url_env.strip() if base_url_env and base_url_env.strip() else None
 
-    resp = client.chat.completions.create(
-        model=model,
-        temperature=0.2,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
+    model_env = os.environ.get("OPENAI_MODEL")
+    model = (model_env.strip() if model_env and model_env.strip() else "gpt-4o-mini")
+
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        base_url=base_url,
+        timeout=20,
     )
-    return resp.choices[0].message.content.strip()
+
+    last_err = None
+    for attempt in range(1, 4):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                temperature=0.2,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            return resp.choices[0].message.content.strip()
+        except (APIConnectionError, Timeout) as e:
+            last_err = f"network/timeout on attempt {attempt}: {e}"
+        except (RateLimitError, APIError) as e:
+            last_err = f"api error on attempt {attempt}: {e}"
+        time.sleep(2 * attempt)
+
+    raise RuntimeError(f"OpenAI call failed after retries: {last_err}")
 
 
 # ---------------- prompts ----------------
